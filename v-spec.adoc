@@ -10,12 +10,12 @@ Version 0.7.0-draft-20190222
 :ge: &#8805;
 
 Contributors include: Alon Amid, Krste Asanovic, Allen Baum, Alex
-Bradbury, Tony Brewer, Chris Celio, Silviu Chiricescu, Ken Dockser,
-Bob Dreyer, Roger Espasa, Sean Halle, John Hauser, David Horner, Bruce
-Hoult, Bill Huffman, Constantine Korikov, Ben Korpan, Robin Kruppe,
-Yunsup Lee, Guy Lemieux, Rich Newell, Albert Ou, David Patterson,
-Colin Schmidt, Alex Solomatnikov, Steve Wallach, Andrew Waterman, Jim
-Wilson.
+Bradbury, Tony Brewer, Chris Celio, Aliaksei Chapyzhenka, Silviu
+Chiricescu, Ken Dockser, Bob Dreyer, Roger Espasa, Sean Halle, John
+Hauser, David Horner, Bruce Hoult, Bill Huffman, Constantine Korikov,
+Ben Korpan, Robin Kruppe, Yunsup Lee, Guy Lemieux, Filip Moc, Rich
+Newell, Albert Ou, David Patterson, Colin Schmidt, Alex Solomatnikov,
+Steve Wallach, Andrew Waterman, Jim Wilson.
 
 Known issues with current version:
 
@@ -130,10 +130,13 @@ element number given in the `vstart` CSR, leaving earlier elements in
 the destination vector undisturbed, and to reset the `vstart` CSR to
 zero at the end of execution.
 
+NOTE: All vector instructions, including `vsetvl{i}`, reset the `vstart`
+CSR to zero.
+
 If the value in the `vstart` register is greater than or equal to the
-vector length `vl` then no element operations are performed, though
-elements at the end of the destination vector past `vl` are zeroed,
-and the `vstart` register is reset to zero.
+vector length `vl` then no element operations are performed, nor are the
+elements at the end of the destination vector past `vl` zeroed.  The
+`vstart` register is then reset to zero.
 
 The `vstart` CSR is defined to have only enough writeable bits to hold
 the largest element index (one less than the maximum VLMAX) or
@@ -343,8 +346,11 @@ instruction variants.
 The `vl` register holds an unsigned integer specifying the number of
 elements to be updated by a vector instruction.  Elements in the
 destination vector with indices {ge} `vl` are zeroed during
-execution of a vector instruction.  As a special case, when `vl`=0,
+execution of a vector instruction.  When `vstart` {ge} `vl`,
 no elements are updated in the destination vector.
+
+NOTE: As a consequence, when `vl`=0, no elements are
+updated inthe destination vector, regardless of `vstart`.
 
 NOTE: The number of bits implemented in `vl` depends on the
 implementation's maximum vector length of the smallest supported
@@ -1089,7 +1095,7 @@ If the `vtype` setting is not supported by the implementation, then
 the `vill` bit is set in `vtype`, and the other defined fields are set
 to the "closest" supported value as defined below:
 
-* `vsew` is set to the largest legal value smaller than the requested
+* `vsew` is set to the largest legal value equal to or smaller than the requested
 setting
 * `vlmul` is set to the requested value, as all LMUL settings must be supported
 * `vediv` is set to the largest legal value equal to or smaller than the requested subdivide for the value that is in `vsew` (this might not be the requested `vsew`)
@@ -1100,7 +1106,7 @@ The requested application vector length (AVL) is passed in `rs1` as an
 unsigned integer.  Using `x0` as the `rs1` register specifier, encodes
 an infinite AVL, and so requests the maximum possible vector length.
 
-NOTE: A `vsetvl` with AVL=`x0` can be used to read current VLMAX,
+NOTE: A `vsetvli` with AVL=`x0` can be used to read current VLMAX,
 though this does overwrite `vl`.
 
 NOTE: Earlier drafts required a trap when setting `vtype` to an
@@ -1111,18 +1117,20 @@ vector unit configurations.
 
 === Constraints on Setting `vl`
 
-The resulting `vl` setting must satisfy the following constraints:
+The `vsetvl{i}` instructions first set VLMAX according to the `vtype`
+argument, then set `vl` obeying the following constraints:
 
 . `vl = AVL` if `AVL {le} VLMAX`
 . `vl {ge} ceil(AVL / 2)` if `AVL < (2 * VLMAX)`
 . `vl = VLMAX` if `AVL {ge} (2 * VLMAX)`
-. Deterministic on any given implementation for same input AVL and `vtype` values
+. Deterministic on any given implementation for same input AVL and VLMAX values
 . These specific properties follow from the prior rules:
 .. `vl = 0` if  `AVL = 0`
 .. `vl > 0` if `AVL > 0`
 .. `vl {le} VLMAX`
 .. `vl {le} AVL`
-.. a value read from `vl` when used as AVL arg to `vsetvl{i}` results in same value in `vl`
+.. a value read from `vl` when used as the AVL argument to `vsetvl{i}` results in the same
+value in `vl`, provided the resultant VLMAX equals the value of VLMAX at the time that `vl` was read
 
 [NOTE]
 --
@@ -1190,14 +1198,14 @@ throughput on mixed-width operations in a single loop.
 # Loop using only widest elements:
 
 loop:
-    vsetvli a3, a0, e32,m8   # Use only 32-bit elements
+    vsetvli a3, a0, e32,m8  # Use only 32-bit elements
     vlh.v v8, (a1)          # Sign-extend 16b load values to 32b elements
-      sll t1, a3, 1
+      sll t1, a3, 1         # Multiply length by two bytes/element
       add a1, a1, t1        # Bump pointer
     vmul.vx  v8, v8, x10    # 32b multiply result
     vsrl.vi  v8, v8, 3      # Shift elements
     vsw.v v8, (a2)          # Store vector of 32b results
-      sll t1, a3, 2
+      sll t1, a3, 2         # Multiply length by four bytes/element
       add a2, a2, t1        # Bump pointer
       sub a0, a0, a3        # Decrement count
       bnez a0, loop         # Any more?
@@ -1207,14 +1215,14 @@ loop:
 loop:
     vsetvli a3, a0, e16,m4  # vtype = 16-bit integer vectors
     vlh.v v4, (a1)          # Get 16b vector
-      slli t1, a3, 1
+      slli t1, a3, 1        # Multiply length by two bytes/element
       add a1, a1, t1        # Bump pointer
     vwmul.vx v8, v4, x10    # 32b in <v8--v15>
 
     vsetvli x0, a0, e32,m8  # Operate on 32b values
     vsrl.vi v8, v8, 3
     vsw.v v8, (a2)          # Store vector of 32b
-      slli t1, t1, 2
+      slli t1, a3, 2        # Multiply length by four bytes/element
       add a2, a2, t1        # Bump pointer
       sub a0, a0, a3        # Decrement count
       bnez a0, loop         # Any more?
@@ -4148,10 +4156,10 @@ an element-wide result.
 ----
 # Sum each sub-vector of four bytes into a 16-bit result.
 vsetvli t0, a0, e32,d4  # Vectors of 32-bit elements, divided into byte sub-elements
-vredsum.vv v1, v2, v3 # v1[i][15:0] = v2[i][31:24] + v2[i][23:16]
+vredsum.vs v1, v2, v3 # v1[i][15:0] = v2[i][31:24] + v2[i][23:16]
                       #              + v2[i][15:8] + v2[i][7:0] + v3[i][31:0]
 
-vredmax.vv v5, v6, v7 # v5[i][31:0] = max(v6[i][31:24], v6[i][23:16],
+vredmax.vs v5, v6, v7 # v5[i][31:0] = max(v6[i][31:24], v6[i][23:16],
                       #                    v6[i][15:8], v6[i][7:0], v7[i][31:0])
 ----
 
